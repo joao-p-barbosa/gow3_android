@@ -3102,8 +3102,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         static std::unordered_set<std::string> seen;
         std::scoped_lock lock{mutex};
         if (seen.size() < 600 && seen.insert(line).second) {
-            std::printf("PassSize: %s
-", line.c_str());
+            std::printf("PassSize: %s\n", line.c_str());
             std::fflush(stdout);
         }
     }
