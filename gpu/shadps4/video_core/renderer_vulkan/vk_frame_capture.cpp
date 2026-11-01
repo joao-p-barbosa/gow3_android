@@ -224,6 +224,13 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     // Frame boundaries in the command stream: the pass that writes a display buffer as its only
     // target. gow3: God of War III also draws scene passes (two targets) into display buffers.
     display = display && targets.size() == 1;
+    // gow3 xclipse: keep recording across display-buffer passes for a whole-frame capture.
+    static const size_t min_passes = [] {
+        const char* env = std::getenv("GOW3_CAPTURE_MIN_PASSES");
+        return env ? size_t(std::atoi(env)) : size_t{0};
+    }();
+    display = display && (state.load(std::memory_order_relaxed) != Recording ||
+                          entries.size() >= min_passes);
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
     if (display && new_pass) {

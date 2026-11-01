@@ -3446,6 +3446,25 @@ void Rasterizer::UpdateViewportScissorState() const {
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.SetViewports(viewports);
     dynamic_state.SetScissors(scissors);
+    // gow3 xclipse: one line per distinct scissor, with the registers it came from.
+    static const bool scissor_log = std::getenv("GOW3_PASS_SIZE_LOG") != nullptr;
+    if (scissor_log && !scissors.empty()) {
+        const auto& s = scissors[0];
+        const auto line = fmt::format(
+            "{}x{}+{}+{} n={} cb0={:x} screen={}x{} window={}x{} generic={}x{} scale={:.3f}", s.extent.width,
+            s.extent.height, s.offset.x, s.offset.y, scissors.size(),
+            u64(regs.color_buffers[0].Address()), u32(regs.screen_scissor.bottom_right_x),
+            u32(regs.screen_scissor.bottom_right_y), u32(regs.window_scissor.bottom_right_x),
+            u32(regs.window_scissor.bottom_right_y), u32(regs.generic_scissor.bottom_right_x),
+            u32(regs.generic_scissor.bottom_right_y), target_scale[0]);
+        static std::mutex mutex;
+        static std::unordered_set<std::string> seen;
+        std::scoped_lock lock{mutex};
+        if (seen.size() < 300 && seen.insert(line).second) {
+            std::printf("Scissor: %s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
 }
 
 vk::Pipeline Rasterizer::SquarePass(const GraphicsPipeline& pipeline) const {
