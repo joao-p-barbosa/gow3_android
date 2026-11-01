@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
+#include <mutex>
+#include <unordered_set>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "gow3_toggles.h"
@@ -3075,6 +3078,34 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // gow3: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
         object_motion->Attach(state, state.width, state.height);
+    }
+    // gow3 xclipse: one line per distinct pass shape, to find what limits the render area.
+    static const bool pass_size_log = std::getenv("GOW3_PASS_SIZE_LOG") != nullptr;
+    if (pass_size_log) {
+        std::string targets;
+        for (u32 cb = 0; cb < state.num_color_attachments; ++cb) {
+            if (cb_descs[cb].first) {
+                const auto& info = texture_cache.GetImage(cb_descs[cb].first).info;
+                targets += fmt::format(" c{}={}x{}@{:x}/{}", cb, info.size.width, info.size.height,
+                                       info.guest_address, vk::to_string(info.pixel_format));
+            }
+        }
+        if (db_desc.first) {
+            const auto& info = texture_cache.GetImage(db_desc.first).info;
+            targets += fmt::format(" d={}x{}@{:x}", info.size.width, info.size.height,
+                                   info.guest_address);
+        }
+        const auto line = fmt::format("{}x{} reduced={} vp={:.0f}x{:.0f}{}", state.width,
+                                      state.height, reduced, regs.viewports[0].xscale * 2,
+                                      regs.viewports[0].yscale * 2, targets);
+        static std::mutex mutex;
+        static std::unordered_set<std::string> seen;
+        std::scoped_lock lock{mutex};
+        if (seen.size() < 600 && seen.insert(line).second) {
+            std::printf("PassSize: %s
+", line.c_str());
+            std::fflush(stdout);
+        }
     }
     return state;
 }

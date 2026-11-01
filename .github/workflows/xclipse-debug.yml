@@ -1,0 +1,124 @@
+name: xclipse-debug
+
+on:
+  push:
+    branches: [xclipse-fix]
+  workflow_dispatch:
+
+concurrency:
+  group: xclipse-debug-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_PLATFORM: '35'
+  ANDROID_BUILD_TOOLS: '35.0.0'
+
+jobs:
+  debug-apk:
+    name: Build debuggable APK (com.gow3.android.bionic.debug)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore Android SDK package cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/platform-tools
+            /usr/local/lib/android/sdk/platforms/android-${{ env.ANDROID_PLATFORM }}
+            /usr/local/lib/android/sdk/build-tools/${{ env.ANDROID_BUILD_TOOLS }}
+            /usr/local/lib/android/sdk/ndk/29.0.14206865
+          key: android-sdk-${{ runner.os }}-${{ env.ANDROID_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: ci/environment.yml
+          cache-environment: true
+          init-shell: bash
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-${{ env.ANDROID_PLATFORM }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS }}
+            ndk;29.0.14206865
+
+      - name: Install Android and native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang lld llvm cmake ninja-build meson pkg-config patchelf ccache \
+            libxml2-utils unzip xz-utils zstd
+
+      - name: Restore reproducible build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            .local-deps/android/src
+            .local-deps/android/m2
+            .local-deps/android/steam-libs
+            ~/.cache/ccache
+          key: xclipse-${{ runner.os }}-${{ hashFiles('tools/android/**', 'cpu/**', 'gpu/CMakeLists.txt', 'gpu/third_party/**', 'ci/**') }}
+          restore-keys: xclipse-${{ runner.os }}-
+
+      # Same key every run, so a new build installs over the previous one.
+      - name: Restore debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: xclipse-debug-keystore-v1
+
+      - name: Build pinned host dependencies
+        shell: bash -el {0}
+        run: bash ci/setup-deps.sh "$CONDA_PREFIX"
+
+      - name: Configure build environment
+        shell: bash -el {0}
+        run: |
+          cmake_dir="$CONDA_PREFIX/lib/cmake"
+          boost_dir=$(compgen -G "$cmake_dir/Boost-*/BoostConfig.cmake" | head -1 | xargs dirname)
+          boost_headers_dir=$(compgen -G "$cmake_dir/boost_headers-*/boost_headers-config.cmake" | head -1 | xargs dirname || true)
+          {
+            echo "GOW3_ARM64_HEADERS=$CONDA_PREFIX"
+            echo "GOW3_JOBS=$(nproc)"
+            echo "GOW3_BUILD_TOOLS=$ANDROID_BUILD_TOOLS"
+            echo "GOW3_BOOST_DIR=$boost_dir"
+            echo "GOW3_BOOST_HEADERS_DIR=${boost_headers_dir:-$boost_dir}"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch Steam libraries
+        run: bash tools/android/inputs/fetch_steam_libs.sh
+
+      - name: Build the Bionic runtime
+        shell: bash -el {0}
+        run: |
+          bash tools/android/build_bionic_deps.sh
+          bash tools/android/build_bionic.sh
+
+      - name: Build the debug APK
+        run: |
+          bash tools/android/debug/stage_bionic_runtime.sh
+          ./android-launcher/gradlew -p android-launcher :app:mergeDebugJniLibFolders :app:assembleDebug --rerun-tasks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gow3-xclipse-debug-${{ github.sha }}
+          path: android-launcher/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
