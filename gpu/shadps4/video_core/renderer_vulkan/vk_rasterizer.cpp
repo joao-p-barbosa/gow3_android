@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
+#include <span>
 #include <unordered_set>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
@@ -21,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_depth_stencil_state.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_indirect_guard.h"
@@ -1120,6 +1123,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     MarkPass(pipeline, state);
     const auto zpass_query = predication.PrepareDrawQuery();
     const auto predicate_state = predication.CapturePredicate();
+    RefreshTargetExtent(state);
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -1268,6 +1272,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     MarkPass(pipeline, state);
     const auto zpass_query = predication.PrepareDrawQuery();
     const auto predicate_state = predication.CapturePredicate();
+    RefreshTargetExtent(state);
     scheduler.BeginRendering(state);
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
@@ -3301,6 +3306,89 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
                              instance.IsDynamicColorWriteMaskSupported(),
                              instance.IsAttachmentFeedbackLoopLayoutSupported(),
                              [&](auto&& command) { scheduler.Record(std::move(command)); });
+}
+
+// gow3 xclipse: Samsung's driver keeps the last color target's size for a pass without color
+// targets, so a depth prepass after the 512x256 pass only writes that corner and the scene it
+// gates disappears elsewhere. An empty color pass of the right size refreshes the driver's extent.
+void Rasterizer::RefreshTargetExtent(const RenderState& state) {
+    static const bool enabled = [this] {
+        const char* env = std::getenv("GOW3_DEPTH_EXTENT_FIX");
+        return instance.GetVendorID() == 0x144D && (!env || env[0] != '0');
+    }();
+    if (!enabled || !scheduler.WillBeginRendering(state)) {
+        return;
+    }
+    const std::pair<u32, u32> extent{state.width, state.height};
+    const bool has_color = std::ranges::any_of(
+        std::span{state.color_attachments}.first(state.num_color_attachments),
+        [](const auto& attachment) { return bool(attachment.image_view); });
+    if (has_color) {
+        driver_target_extent = extent;
+        return;
+    }
+    if (!state.depth_stencil_attachment.image_view || driver_target_extent == extent) {
+        return;
+    }
+    auto [it, created] = extent_targets.try_emplace(extent);
+    auto& target = it->second;
+    if (created) {
+        const auto device = instance.GetDevice();
+        target.image = VideoCore::UniqueImage(device, instance.GetAllocator());
+        target.image.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eR8Unorm,
+            .extent = {state.width, state.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        target.view = Check(device.createImageViewUnique({
+            .image = vk::Image(target.image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eR8Unorm,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        std::printf("Depth extent fix: %ux%u target\n", state.width, state.height);
+    }
+    scheduler.EndRendering();
+    const vk::ImageMemoryBarrier2 barrier{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .image = vk::Image(target.image),
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    const vk::Extent2D size{state.width, state.height};
+    scheduler.Record([barrier, view = *target.view, size](vk::CommandBuffer cmd) {
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+        const vk::RenderingAttachmentInfo color{
+            .imageView = view,
+            .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .loadOp = vk::AttachmentLoadOp::eClear,
+            .storeOp = vk::AttachmentStoreOp::eDontCare,
+        };
+        cmd.beginRendering({
+            .renderArea = {{0, 0}, size},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &color,
+        });
+        const vk::ClearAttachment clear{
+            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .colorAttachment = 0,
+        };
+        const vk::ClearRect rect{.rect = {{0, 0}, size}, .baseArrayLayer = 0, .layerCount = 1};
+        cmd.clearAttachments(clear, rect);
+        cmd.endRendering();
+    });
+    driver_target_extent = extent;
 }
 
 void Rasterizer::UpdateViewportScissorState() const {

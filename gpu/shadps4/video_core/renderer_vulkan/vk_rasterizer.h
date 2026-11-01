@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <map>
+#include <utility>
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -214,6 +216,7 @@ private:
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
     void UpdateViewportScissorState() const;
+    void RefreshTargetExtent(const RenderState& state);
     void UpdateDepthStencilState() const;
     /// gow3: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
     vk::Pipeline SquarePass(const GraphicsPipeline& pipeline) const;
@@ -347,6 +350,12 @@ private:
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
     std::unique_ptr<ObjectMotion> object_motion;
+    struct ExtentTarget {
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+    };
+    std::map<std::pair<u32, u32>, ExtentTarget> extent_targets; ///< gow3 xclipse
+    std::pair<u32, u32> driver_target_extent{};                 ///< gow3 xclipse
     bool motion_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;

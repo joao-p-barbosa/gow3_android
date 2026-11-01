@@ -81,8 +81,10 @@ jobs:
       - name: Restore debug signing key
         uses: actions/cache@v4
         with:
-          path: ~/.android/debug.keystore
-          key: xclipse-debug-keystore-v1
+          path: |
+            ~/.android/debug.keystore
+            ~/.config/.android/debug.keystore
+          key: xclipse-debug-keystore-v2
 
       - name: Build pinned host dependencies
         shell: bash -el {0}
